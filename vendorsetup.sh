@@ -91,7 +91,6 @@ else
 		echo "I: This script requires bash. Not processing the $FDEVICE $(basename $0)"
 	fi
 fi
-#
 
 # Clone kernel tree
-git clone --depth=1 https://github.com/Romeo13card/kernel_xiaomi_sm6225 -b neutron kernel/xiaomi/fog
+git clone --depth=1 https://github.com/alternoegraha/kernel_xiaomi_sm6225 kernel/xiaomi/fog
