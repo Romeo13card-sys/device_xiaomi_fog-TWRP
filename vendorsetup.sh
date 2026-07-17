@@ -50,7 +50,7 @@ if [ "$1" = "$FDEVICE" -o "$FOX_BUILD_DEVICE" = "$FDEVICE" ]; then
 	export OF_DONT_PATCH_ENCRYPTED_DEVICE=1
 	export OF_NO_TREBLE_COMPATIBILITY_CHECK=1
 	export FOX_BUILD_TYPE="Stable"
-    export FOX_VARIANT="default"
+        export FOX_VARIANT="default"
 	export OF_MAINTAINER="romeo_13card"
         export FOX_VIRTUAL_AB_DEVICE=1
         export OF_ADVANCED_SECURITY=1
@@ -75,6 +75,17 @@ if [ "$1" = "$FDEVICE" -o "$FOX_BUILD_DEVICE" = "$FDEVICE" ]; then
    	   export | grep "TARGET_" >> $FOX_BUILD_LOG_FILE
   	   export | grep "TW_" >> $FOX_BUILD_LOG_FILE
  	fi
+
+	# flashlight settings (verified via ADB)
+	export OF_FLASHLIGHT_PATH="/sys/class/leds/led:torch/brightness"
+	export OF_USE_FLASHLIGHT_BRIGHTNESS=1
+
+	# clock settings
+	export OF_CLOCK_AM_PM=1
+	export OF_USE_CLOCK_SECONDS=1
+
+	# enable adb during zip installation
+	export OF_ADB_AFTER_ZIP=1
 else
 	if [ -z "$FOX_BUILD_DEVICE" -a -z "$BASH_SOURCE" ]; then
 		echo "I: This script requires bash. Not processing the $FDEVICE $(basename $0)"
