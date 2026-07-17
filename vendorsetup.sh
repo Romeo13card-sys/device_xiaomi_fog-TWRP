@@ -49,7 +49,9 @@ if [ "$1" = "$FDEVICE" -o "$FOX_BUILD_DEVICE" = "$FDEVICE" ]; then
         export OF_NO_MIUI_PATCH_WARNING=1
 	export OF_DONT_PATCH_ENCRYPTED_DEVICE=1
 	export OF_NO_TREBLE_COMPATIBILITY_CHECK=1
-	export FOX_VERSION="R12.0_0"
+	export FOX_BUILD_TYPE="Stable"
+    export FOX_VARIANT="default"
+	export FOX_VERSION="R12.0"
 	export OF_MAINTAINER="romeo_13card"
         export FOX_VIRTUAL_AB_DEVICE=1
         export OF_ADVANCED_SECURITY=1
