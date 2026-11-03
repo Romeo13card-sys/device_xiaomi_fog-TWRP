@@ -1,25 +1,43 @@
-name: AERA 16.0 - Redmi 10C (fog)
+name: AERA Recovery 16.0 - Redmi 10C (fog)
 
 on:
   workflow_dispatch:
+    inputs:
+      sync_jobs:
+        description: Parallel repo sync jobs
+        required: true
+        default: '2'
+        type: choice
+        options: ['1', '2', '4']
+      build_jobs:
+        description: Parallel build jobs
+        required: true
+        default: '2'
+        type: choice
+        options: ['1', '2', '4']
 
 permissions:
   contents: read
 
+concurrency:
+  group: aera-fog-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
-    name: Build AERA Recovery
+    name: Build AERA 16.0 for fog
     runs-on: ubuntu-24.04
     timeout-minutes: 360
-
     defaults:
       run:
         shell: bash
-
     env:
       ANDROID_DIR: ${{ github.workspace }}/android
-      CCACHE_DIR: ${{ github.workspace }}/.ccache
-      USE_CCACHE: "0"
+      DEVICE_DIR: device/xiaomi/fog
+      USE_CCACHE: '0'
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+      GIT_TERMINAL_PROMPT: '0'
 
     steps:
       - name: Checkout device tree
@@ -28,139 +46,108 @@ jobs:
           path: fog-tree
           persist-credentials: false
 
-      - name: Free disk space
+      - name: Check resources and free disk space
         run: |
-          set -euo pipefail
-
-          echo "=== Disk before cleanup ==="
-          df -h
-
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/share/powershell
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /usr/local/.ghcup
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-
-          sudo apt-get clean
-
-          echo "=== Disk after cleanup ==="
-          df -h
+          set -eo pipefail
+          echo '=== Runner ==='
+          echo "$RUNNER_NAME ($RUNNER_OS / $RUNNER_ARCH)"
+          nproc
           free -h
+          echo '=== Disk before cleanup ==='
+          df -h
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet \
+            /usr/local/share/powershell /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL
+          sudo apt-get clean
+          echo '=== Disk after cleanup ==='
+          df -h
 
       - name: Install build dependencies
         run: |
-          set -euo pipefail
-
+          set -eo pipefail
           sudo apt-get update
-
-          sudo DEBIAN_FRONTEND=noninteractive \
-            apt-get install -y --no-install-recommends \
-            git git-lfs curl wget unzip zip \
-            lz4 zstd bc bison flex build-essential \
-            gperf libssl-dev libxml2-utils xsltproc \
-            libncurses-dev python3 python3-pip \
-            ccache rsync openjdk-17-jdk
-
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            git git-lfs curl wget unzip zip lz4 zstd bc bison flex build-essential \
+            gperf libssl-dev libxml2-utils xsltproc libncurses-dev \
+            python3 python3-pip ccache rsync openjdk-17-jdk
           mkdir -p "$HOME/bin"
-
-          curl -fLsS \
-            https://storage.googleapis.com/git-repo-downloads/repo \
-            -o "$HOME/bin/repo"
-
+          curl -fLsS https://storage.googleapis.com/git-repo-downloads/repo -o "$HOME/bin/repo"
           chmod +x "$HOME/bin/repo"
           echo "$HOME/bin" >> "$GITHUB_PATH"
+          "$HOME/bin/repo" version
 
-      - name: Sync AERA 16.0 sources
+      - name: Initialize AERA 16.0 sources
         run: |
-          set -euo pipefail
-
+          set -eo pipefail
           mkdir -p "$ANDROID_DIR"
           cd "$ANDROID_DIR"
-
-          "$HOME/bin/repo" init \
-            --depth=1 \
+          "$HOME/bin/repo" init --depth=1 \
             -u https://github.com/AERA-Recovery/android_manifest.git \
             -b aera-16.0
+          "$HOME/bin/repo" manifest -o "$GITHUB_WORKSPACE/aera-manifest.xml"
+          echo 'AERA manifest initialized.'
 
-          "$HOME/bin/repo" sync \
-            -c \
-            --no-clone-bundle \
-            --no-tags \
-            -j2 \
-            2>&1 | tee "$GITHUB_WORKSPACE/repo-sync.log"
-
-          echo "=== Disk usage after sync ==="
-          df -h
-
-      - name: Install device tree
+      - name: Sync AERA 16.0 sources (live output)
         run: |
-          set -euo pipefail
-
-          mkdir -p "$ANDROID_DIR/device/xiaomi/fog"
-
-          rsync -a \
-            --exclude='.git' \
-            --exclude='.github' \
-            --exclude='scripts' \
-            "$GITHUB_WORKSPACE/fog-tree/" \
-            "$ANDROID_DIR/device/xiaomi/fog/"
-
-          test -f \
-            "$ANDROID_DIR/device/xiaomi/fog/BoardConfig.mk"
-
-      - name: Prepare OrangeFox kernel
-        run: |
-          set -euo pipefail
-
+          set -eo pipefail
           cd "$ANDROID_DIR"
+          export PYTHONUNBUFFERED=1
+          echo "Sync jobs: ${{ inputs.sync_jobs }}"
+          echo "Started: $(date -u)"
 
-          bash \
-            "$GITHUB_WORKSPACE/fog-tree/scripts/prepare-prebuilt.sh" \
+        
+- name: Install device tree
+        run: |
+          set -eo pipefail
+          mkdir -p "$ANDROID_DIR/$DEVICE_DIR"
+          rsync -a --exclude='.git' --exclude='.github' --exclude='scripts' \
+            "$GITHUB_WORKSPACE/fog-tree/" "$ANDROID_DIR/$DEVICE_DIR/"
+          test -f "$ANDROID_DIR/$DEVICE_DIR/BoardConfig.mk"
+          test -f "$ANDROID_DIR/$DEVICE_DIR/AndroidProducts.mk"
+          test -f "$ANDROID_DIR/$DEVICE_DIR/twrp_fog.mk"
+
+      - name: Prepare working OrangeFox kernel
+        run: |
+          set -eo pipefail
+          cd "$ANDROID_DIR"
+          bash "$GITHUB_WORKSPACE/fog-tree/scripts/prepare-prebuilt.sh" \
             2>&1 | tee "$GITHUB_WORKSPACE/prebuilt.log"
+          test -s "$DEVICE_DIR/prebuilt/Image.gz"
+          ls -lh "$DEVICE_DIR/prebuilt/Image.gz"
 
       - name: Build AERA Recovery
         run: |
-          set -euo pipefail
-
+          set -eo pipefail
           cd "$ANDROID_DIR"
-          export LC_ALL=C
-
+          # Android envsetup.sh requires unset variables to be tolerated.
           source build/envsetup.sh
           lunch twrp_fog-bp2a-eng
-
           set +e
-          m -j2 adbd recoveryimage \
+          m -j"${{ inputs.build_jobs }}" adbd recoveryimage \
             2>&1 | tee "$GITHUB_WORKSPACE/build.log"
-
           result=${PIPESTATUS[0]}
           set -e
-
+          echo "Build exit code: $result"
           exit "$result"
 
       - name: Collect recovery images
         if: success()
         run: |
-          set -euo pipefail
-
+          set -eo pipefail
+          PRODUCT_OUT="$ANDROID_DIR/out/target/product/fog"
           mkdir -p "$GITHUB_WORKSPACE/artifacts"
-
           for img in boot.img recovery.img vendor_boot.img; do
-            file="$ANDROID_DIR/out/target/product/fog/$img"
-
-            if [ -s "$file" ]; then
-              cp -v "$file" "$GITHUB_WORKSPACE/artifacts/"
+            if [ -s "$PRODUCT_OUT/$img" ]; then
+              cp -v "$PRODUCT_OUT/$img" "$GITHUB_WORKSPACE/artifacts/"
             fi
           done
-
-          if ! compgen -G \
-            "$GITHUB_WORKSPACE/artifacts/*.img" > /dev/null; then
-            echo "ERROR: No recovery image generated"
+          compgen -G "$GITHUB_WORKSPACE/artifacts/*.img" > /dev/null || {
+            echo '::error::No recovery images generated.'
             exit 1
-          fi
-
+          }
           cd "$GITHUB_WORKSPACE/artifacts"
           sha256sum ./*.img > SHA256SUMS
+          ls -lh
 
       - name: Upload recovery images
         if: success()
@@ -171,11 +158,12 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      - name: Show disk usage
+      - name: Final diagnostics
         if: always()
         run: |
           df -h
           free -h
+          ls -lh "$GITHUB_WORKSPACE/"*.log 2>/dev/null || true
 
       - name: Upload build logs
         if: always()
@@ -184,7 +172,4 @@ jobs:
           name: AERA-fog-build-logs
           path: |
             repo-sync.log
-            prebuilt.log
-            build.log
-          if-no-files-found: ignore
-          retention-days: 7
+          
