@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       runner:
-        description: 'self-hosted recommended (>=120 GB free, >=24 GB RAM)'
+        description: 'GitHub-hosted larger runner label (configure aera-large first)'
         required: true
         type: choice
-        default: self-hosted
-        options: [self-hosted, ubuntu-24.04]
+        default: aera-large
+        options: [aera-large]
       sync_jobs:
         description: 'Parallel repo sync jobs'
         required: true
@@ -21,7 +21,7 @@ permissions:
 
 jobs:
   build:
-    # Standard GitHub-hosted runner usually cannot hold Android 16 sources.
+    # GitHub-hosted LARGER RUNNER; create runner with label aera-large (8 vCPU / 32 GB / 300 GB).
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 360
     defaults:
@@ -43,9 +43,10 @@ jobs:
           set -euo pipefail
           df -h .
           free -h
+          echo "Runner: $RUNNER_NAME / $RUNNER_OS"
           avail=$(df -Pk . | awk 'NR==2 {print $4}')
-          if (( avail < 104857600 )); then
-            echo 'ERROR: Android 16 sync requires at least 100 GiB free disk. Select self-hosted with enough space.' >&2
+          if (( avail < 157286400 )); then
+            echo 'ERROR: Less than 150 GiB free. Configure a GitHub larger runner (8 CPU, 32GB, 300GB) with label aera-large.' >&2
             exit 1
           fi
 
@@ -91,7 +92,7 @@ jobs:
           source build/envsetup.sh
           lunch twrp_fog-bp2a-eng
           set +e
-          m -j"$(nproc)" adbd recoveryimage 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+          m -j4 adbd recoveryimage 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
           result=${PIPESTATUS[0]}
           set -e
           echo "Build exit code: $result"
