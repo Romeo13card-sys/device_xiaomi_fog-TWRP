@@ -94,9 +94,8 @@ jobs:
           export PYTHONUNBUFFERED=1
           echo "Sync jobs: ${{ inputs.sync_jobs }}"
           echo "Started: $(date -u)"
-
-        
-- name: Install device tree
+          
+      - name: Install device tree
         run: |
           set -eo pipefail
           mkdir -p "$ANDROID_DIR/$DEVICE_DIR"
