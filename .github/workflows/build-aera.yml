@@ -5,17 +5,17 @@ on:
   workflow_dispatch:
     inputs:
       sync_jobs:
-        description: "Repo sync jobs"
+        description: Parallel repo sync jobs
         required: true
-        default: "2"
+        default: '2'
         type: choice
-        options: ["1", "2", "4"]
+        options: ['1', '2', '4']
       build_jobs:
-        description: "Build jobs"
+        description: Parallel build jobs
         required: true
-        default: "2"
+        default: '2'
         type: choice
-        options: ["1", "2", "4"]
+        options: ['1', '2', '4']
 
 permissions:
   contents: read
@@ -37,40 +37,38 @@ jobs:
     env:
       ANDROID_DIR: ${{ github.workspace }}/android
       DEVICE_DIR: device/xiaomi/fog
-      USE_CCACHE: "0"
+      SYNC_JOBS: ${{ inputs.sync_jobs }}
+      BUILD_JOBS: ${{ inputs.build_jobs }}
+      USE_CCACHE: '0'
       LANG: C.UTF-8
       LC_ALL: C.UTF-8
-      GIT_TERMINAL_PROMPT: "0"
+      GIT_TERMINAL_PROMPT: '0'
 
     steps:
-      - name: Checkout device tree
+      - name: Checkout fog device tree
         uses: actions/checkout@v4
         with:
           path: fog-tree
           persist-credentials: false
 
-      - name: Free disk space
+      - name: Prepare disk space
         run: |
           set -eo pipefail
-
-          echo "=== BEFORE CLEANUP ==="
-          df -h
+          echo '=== Runner resources before cleanup ==='
+          df -h /
           free -h
 
-          sudo rm -rf \
-            /usr/local/lib/android \
-            /usr/share/dotnet \
-            /usr/local/share/powershell \
-            /opt/ghc \
-            /usr/local/.ghcup \
+          sudo rm -rf /usr/local/lib/android \
+            /usr/share/dotnet /usr/local/share/powershell \
+            /opt/ghc /usr/local/.ghcup \
             /opt/hostedtoolcache/CodeQL
 
           sudo apt-get clean
 
-          echo "=== AFTER CLEANUP ==="
-          df -h
+          echo '=== Available disk space ==='
+          df -h /
 
-      - name: Install build dependencies
+      - name: Install build tools
         run: |
           set -eo pipefail
 
@@ -80,123 +78,119 @@ jobs:
             apt-get install -y --no-install-recommends \
             git git-lfs curl wget unzip zip \
             lz4 zstd bc bison flex build-essential \
-            gperf libssl-dev libxml2-utils \
-            xsltproc libncurses-dev \
-            python3 python3-pip \
-            ccache rsync openjdk-17-jdk
+            gperf libssl-dev libxml2-utils xsltproc \
+            libncurses-dev python3 python3-pip rsync \
+            openjdk-17-jdk util-linux
 
           mkdir -p "$HOME/bin"
 
-          curl -fLsS \
+          curl -fLsS --retry 3 \
             https://storage.googleapis.com/git-repo-downloads/repo \
             -o "$HOME/bin/repo"
 
           chmod +x "$HOME/bin/repo"
 
-          echo "$HOME/bin" >> "$GITHUB_PATH"
-
           "$HOME/bin/repo" version
+          command -v script
 
-      - name: Initialize AERA 16.0
+      - name: Initialize AERA 16.0 manifest
         run: |
           set -eo pipefail
 
           mkdir -p "$ANDROID_DIR"
           cd "$ANDROID_DIR"
 
-          "$HOME/bin/repo" init \
-            --depth=1 \
+          "$HOME/bin/repo" init --depth=1 \
             -u https://github.com/AERA-Recovery/android_manifest.git \
             -b aera-16.0
 
           "$HOME/bin/repo" manifest \
             -o "$GITHUB_WORKSPACE/aera-manifest.xml"
 
-          echo "Manifest initialized successfully"
+          echo 'Manifest initialized.'
 
-      - name: Sync AERA sources
+      - name: Repo sync - live progress
         run: |
           set -eo pipefail
 
           cd "$ANDROID_DIR"
           export PYTHONUNBUFFERED=1
 
-          echo "=== STARTING REPO SYNC ==="
-          echo "Jobs: ${{ inputs.sync_jobs }}"
-          date -u
+          echo "=== Syncing AERA 16.0 with ${SYNC_JOBS} jobs ==="
+          echo "Started: $(date -u)"
 
-          sync_success=0
+          # Allocate a terminal to display normal repo progress.
+          # Preserve repo's exit status and save the live output.
 
-          for attempt in 1 2 3; do
-            echo "=== SYNC ATTEMPT $attempt ==="
+          for attempt in 1 2; do
+            echo "=== repo sync attempt ${attempt}/2 ==="
 
             set +e
 
-            "$HOME/bin/repo" sync \
-              -c \
-              --no-clone-bundle \
-              --no-tags \
-              --jobs="${{ inputs.sync_jobs }}" \
-              --jobs-network="${{ inputs.sync_jobs }}" \
-              --jobs-checkout=2 \
-              --no-progress \
-              2>&1 | tee -a "$GITHUB_WORKSPACE/repo-sync.log"
+            script -q -e -c \
+              "$HOME/bin/repo sync -c --no-clone-bundle --no-tags -j${SYNC_JOBS}" \
+              /dev/null 2>&1 | tee -a "$GITHUB_WORKSPACE/repo-sync.log"
 
             status=${PIPESTATUS[0]}
-
             set -e
 
             if [ "$status" -eq 0 ]; then
-              sync_success=1
+              echo '=== repo sync completed successfully ==='
               break
             fi
 
-            echo "Sync failed: exit code $status"
-            df -h
+            echo "repo sync failed with code ${status}"
 
-            if [ "$attempt" -lt 3 ]; then
-              sleep 15
+            if [ "$attempt" -eq 2 ]; then
+              echo '::error::repo sync failed after two attempts'
+              exit "$status"
             fi
+
+            sleep 15
           done
 
-          if [ "$sync_success" -ne 1 ]; then
-            echo "::error::Repo sync failed"
-            exit 1
-          fi
-
-          echo "=== REPO SYNC COMPLETED ==="
-
           test -f build/envsetup.sh || {
-            echo "::error::Android build system missing"
+            echo '::error::Android build/envsetup.sh was not synced'
             exit 1
           }
 
-          echo "=== SOURCE SIZE ==="
-          du -sh "$ANDROID_DIR" || true
+          test -f system/tools/mkbootimg/unpack_bootimg.py || {
+            echo '::error::mkbootimg source was not synced'
+            exit 1
+          }
 
-          echo "=== FREE DISK SPACE ==="
-          df -h
+          df -h /
 
-      - name: Install device tree
+      - name: Install fog device tree
         run: |
           set -eo pipefail
 
           mkdir -p "$ANDROID_DIR/$DEVICE_DIR"
 
           rsync -a \
-            --exclude=".git" \
-            --exclude=".github" \
-            --exclude="scripts" \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='scripts' \
             "$GITHUB_WORKSPACE/fog-tree/" \
             "$ANDROID_DIR/$DEVICE_DIR/"
 
-          test -f "$ANDROID_DIR/$DEVICE_DIR/BoardConfig.mk"
-          test -f "$ANDROID_DIR/$DEVICE_DIR/AndroidProducts.mk"
-          test -f "$ANDROID_DIR/$DEVICE_DIR/twrp_fog.mk"
+          for file in \
+            BoardConfig.mk \
+            AndroidProducts.mk \
+            twrp_fog.mk \
+            device.mk; do
 
-          echo "Device tree installed successfully"
+            test -f "$ANDROID_DIR/$DEVICE_DIR/$file" || {
+              echo "::error::Missing device tree file: $file"
+              exit 1
+            }
+          done
 
-      - name: Prepare OrangeFox kernel
+          test -f "$ANDROID_DIR/vendor/twrp/config/common.mk"
+
+          echo 'Device tree installed.'
+
+      - name: Extract kernel from working OrangeFox image
         run: |
           set -eo pipefail
 
@@ -206,7 +200,10 @@ jobs:
             "$GITHUB_WORKSPACE/fog-tree/scripts/prepare-prebuilt.sh" \
             2>&1 | tee "$GITHUB_WORKSPACE/prebuilt.log"
 
-          test -s "$DEVICE_DIR/prebuilt/Image.gz"
+          test -s "$DEVICE_DIR/prebuilt/Image.gz" || {
+            echo '::error::OrangeFox kernel extraction failed'
+            exit 1
+          }
 
           ls -lh "$DEVICE_DIR/prebuilt/Image.gz"
 
@@ -216,31 +213,25 @@ jobs:
 
           cd "$ANDROID_DIR"
 
-          # Do not enable nounset for Android envsetup.
-          source build/envsetup.sh
+          echo "=== Building AERA 16.0 with ${BUILD_JOBS} jobs ==="
 
-          lunch twrp_fog-bp2a-eng
+          # No set -u: Android envsetup uses unset variables.
+          # Capture lunch failures and compiler errors.
 
-          echo "=== BUILD STARTED ==="
-          date -u
+          (
+            set -eo pipefail
 
-          set +e
+            source build/envsetup.sh
 
-          m -j"${{ inputs.build_jobs }}" \
-            adbd recoveryimage \
-            2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+            lunch twrp_fog-bp2a-eng
 
-          result=${PIPESTATUS[0]}
+            m -j"$BUILD_JOBS" adbd recoveryimage
 
-          set -e
+          ) 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
 
-          echo "=== BUILD FINISHED ==="
-          date -u
-          echo "Exit code: $result"
+          echo '=== AERA build completed successfully ==='
 
-          exit "$result"
-
-      - name: Collect recovery images
+      - name: Collect images and SHA256
         if: success()
         run: |
           set -eo pipefail
@@ -249,25 +240,31 @@ jobs:
 
           mkdir -p "$GITHUB_WORKSPACE/artifacts"
 
+          found=0
+
           for img in boot.img recovery.img vendor_boot.img; do
             if [ -s "$PRODUCT_OUT/$img" ]; then
               cp -v \
                 "$PRODUCT_OUT/$img" \
                 "$GITHUB_WORKSPACE/artifacts/"
+
+              found=1
             fi
           done
 
-          if ! compgen -G \
-            "$GITHUB_WORKSPACE/artifacts/*.img" > /dev/null; then
-            echo "::error::No recovery image generated"
+          if [ "$found" -eq 0 ]; then
+            echo '::error::Build reported success, but no image was produced'
             exit 1
           fi
 
-          cd "$GITHUB_WORKSPACE/artifacts"
-          sha256sum ./*.img > SHA256SUMS
-          ls -lh
+          (
+            cd "$GITHUB_WORKSPACE/artifacts"
+            sha256sum ./*.img > SHA256SUMS
+          )
 
-      - name: Upload recovery images
+          ls -lh "$GITHUB_WORKSPACE/artifacts"
+
+      - name: Upload AERA recovery images
         if: success()
         uses: actions/upload-artifact@v4
         with:
@@ -276,20 +273,14 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      - name: Final diagnostics
+      - name: Final resource diagnostics
         if: always()
         run: |
-          echo "=== DISK ==="
-          df -h
-
-          echo "=== MEMORY ==="
+          df -h /
           free -h
+          ls -lh "$GITHUB_WORKSPACE/"*.log 2>/dev/null || true
 
-          echo "=== LOGS ==="
-          ls -lh \
-            "$GITHUB_WORKSPACE/"*.log 2>/dev/null || true
-
-      - name: Upload build logs
+      - name: Upload logs and manifest
         if: always()
         uses: actions/upload-artifact@v4
         with:
