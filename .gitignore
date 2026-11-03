@@ -1,0 +1,6 @@
+# Downloaded from the working OrangeFox build at CI time; never commit images.
+/prebuilt/
+/device/xiaomi/fog/prebuilt/
+/out/
+/workspace/
+*.log

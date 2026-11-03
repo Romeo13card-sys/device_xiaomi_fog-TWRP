@@ -1,0 +1,131 @@
+name: AERA 16.0 - Redmi 10C (fog)
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: 'self-hosted recommended (>=120 GB free, >=24 GB RAM)'
+        required: true
+        type: choice
+        default: self-hosted
+        options: [self-hosted, ubuntu-24.04]
+      sync_jobs:
+        description: 'Parallel repo sync jobs'
+        required: true
+        default: '4'
+        type: choice
+        options: ['2', '4', '8']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # Standard GitHub-hosted runner usually cannot hold Android 16 sources.
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: bash
+    env:
+      ANDROID_DIR: ${{ github.workspace }}/android
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      USE_CCACHE: '1'
+    steps:
+      - name: Checkout device tree
+        uses: actions/checkout@v4
+        with:
+          path: fog-tree
+          persist-credentials: false
+
+      - name: Check build resources
+        run: |
+          set -euo pipefail
+          df -h .
+          free -h
+          avail=$(df -Pk . | awk 'NR==2 {print $4}')
+          if (( avail < 104857600 )); then
+            echo 'ERROR: Android 16 sync requires at least 100 GiB free disk. Select self-hosted with enough space.' >&2
+            exit 1
+          fi
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            git-core curl unzip zip lz4 zstd bc bison flex build-essential \
+            gperf libssl-dev libxml2-utils xsltproc libncurses-dev \
+            python3 python3-pip ccache rsync openjdk-17-jdk
+          mkdir -p "$HOME/bin"
+          curl -fLsS https://storage.googleapis.com/git-repo-downloads/repo -o "$HOME/bin/repo"
+          chmod +x "$HOME/bin/repo"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Fetch AERA 16.0 sources
+        run: |
+          set -euo pipefail
+          mkdir -p "$ANDROID_DIR"
+          cd "$ANDROID_DIR"
+          "$HOME/bin/repo" init -u https://github.com/AERA-Recovery/android_manifest.git -b aera-16.0
+          "$HOME/bin/repo" sync -c --force-sync --no-clone-bundle --no-tags -j "${{ inputs.sync_jobs }}" 2>&1 | tee "$GITHUB_WORKSPACE/repo-sync.log"
+
+      - name: Install device tree
+        run: |
+          set -euo pipefail
+          mkdir -p "$ANDROID_DIR/device/xiaomi/fog"
+          rsync -a --exclude='.git' --exclude='.github' --exclude='scripts' \
+            "$GITHUB_WORKSPACE/fog-tree/" "$ANDROID_DIR/device/xiaomi/fog/"
+          test -f "$ANDROID_DIR/device/xiaomi/fog/BoardConfig.mk"
+
+      - name: Prepare working OrangeFox kernel/DTB
+        run: |
+          set -euo pipefail
+          cd "$ANDROID_DIR"
+          bash "$GITHUB_WORKSPACE/fog-tree/scripts/prepare-prebuilt.sh" 2>&1 | tee "$GITHUB_WORKSPACE/prebuilt.log"
+
+      - name: Build AERA recovery
+        run: |
+          set -euo pipefail
+          cd "$ANDROID_DIR"
+          export LC_ALL=C
+          source build/envsetup.sh
+          lunch twrp_fog-bp2a-eng
+          set +e
+          m -j"$(nproc)" adbd recoveryimage 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+          result=${PIPESTATUS[0]}
+          set -e
+          echo "Build exit code: $result"
+          exit "$result"
+
+      - name: Collect boot/recovery image
+        if: success()
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+          found=0
+          for file in "$ANDROID_DIR/out/target/product/fog/boot.img" "$ANDROID_DIR/out/target/product/fog/recovery.img"; do
+            if [ -s "$file" ]; then cp -v "$file" "$GITHUB_WORKSPACE/artifacts/"; found=1; fi
+          done
+          [ "$found" = 1 ] || { echo 'No boot.img or recovery.img was generated' >&2; exit 1; }
+          sha256sum "$GITHUB_WORKSPACE/artifacts/"*.img > "$GITHUB_WORKSPACE/artifacts/SHA256SUMS"
+
+      - name: Upload images
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: AERA-16.0-fog-UNTESTED
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: AERA-16.0-fog-build-logs
+          path: |
+            repo-sync.log
+            prebuilt.log
+            build.log
+          if-no-files-found: ignore
+          retention-days: 14
