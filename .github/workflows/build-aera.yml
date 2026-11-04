@@ -15,6 +15,14 @@ on:
         default: '2'
         type: choice
         options: ['1', '2', '4']
+      notification_mode:
+        description: Telegram notification mode
+        required: true
+        default: quiet
+        type: choice
+        options:
+          - quiet
+          - loud
 
 permissions:
   contents: read
@@ -28,9 +36,11 @@ jobs:
     name: Build AERA 16.0 for fog
     runs-on: ubuntu-24.04
     timeout-minutes: 360
+
     defaults:
       run:
         shell: bash
+
     env:
       ANDROID_DIR: ${{ github.workspace }}/android
       DEVICE_DIR: device/xiaomi/fog
@@ -51,8 +61,28 @@ jobs:
           path: fog-tree
           persist-credentials: false
 
-      # Reuse the effective cleanup action from the successful tornado build.
-      # Pin its commit instead of tracking a mutable @main branch.
+      - name: Notify Telegram - build started
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          NOTIFY_QUIET: ${{ inputs.notification_mode == 'quiet' }}
+        run: |
+          if [[ -n "$TELEGRAM_BOT_TOKEN" && -n "$TELEGRAM_CHAT_ID" ]]; then
+            MESSAGE="🚀 AERA Recovery 16.0 (fog)
+          Build started!
+          Branch: ${GITHUB_REF_NAME}
+          Run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+            curl -fsS --retry 2 --max-time 20 \
+              -X POST \
+              "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+              --data-urlencode "text=${MESSAGE}" \
+              -d "disable_notification=${NOTIFY_QUIET}" \
+              > /dev/null
+          fi
+
       - name: Clean runner disk
         uses: rokibhasansagar/slimhub_actions@c2a6e4317d3de2b623ac7395b05e9d2149e8289b
 
@@ -76,7 +106,6 @@ jobs:
           "$HOME/bin/repo" version
           df -h /
 
-      # AERA's successful example builds with Zulu JDK 11.
       - name: Set up OpenJDK
         uses: actions/setup-java@v6
         with:
@@ -107,9 +136,11 @@ jobs:
               /dev/null 2>&1 | tee -a "$GITHUB_WORKSPACE/repo-sync.log"
             status=${PIPESTATUS[0]}
             set -e
+
             if [ "$status" -eq 0 ]; then
               break
             fi
+
             if [ "$attempt" -eq 2 ]; then
               echo "::error::repo sync failed: ${status}"
               exit "$status"
@@ -127,12 +158,14 @@ jobs:
           mkdir -p "$ANDROID_DIR/$DEVICE_DIR"
           rsync -a --exclude='.git' --exclude='.github' --exclude='scripts' \
             "$GITHUB_WORKSPACE/fog-tree/" "$ANDROID_DIR/$DEVICE_DIR/"
+
           for f in BoardConfig.mk AndroidProducts.mk twrp_fog.mk device.mk; do
             test -f "$ANDROID_DIR/$DEVICE_DIR/$f" || {
               echo "::error::Missing device file $f"
               exit 1
             }
           done
+
           test -f "$ANDROID_DIR/vendor/twrp/config/common.mk"
 
       - name: Prepare known-working OrangeFox kernel
@@ -150,8 +183,7 @@ jobs:
           set -eo pipefail
           available_mb=$(df -Pm / | awk 'NR==2 {print $4}')
           echo "Free disk before swap: ${available_mb} MiB"
-          # The swap action replaces the runner's default 3-GiB swapfile.
-          # Reserve substantial disk space for recovery compilation.
+
           if [ "$available_mb" -ge 59392 ]; then
             swap_gb=30
           elif [ "$available_mb" -ge 39936 ]; then
@@ -161,10 +193,10 @@ jobs:
           else
             swap_gb=0
           fi
+
           echo "swap_gb=$swap_gb" >> "$GITHUB_OUTPUT"
           echo "Selected swap size: ${swap_gb} GiB"
 
-      # Same swap action as tornado; adapt amount to the actual free disk.
       - name: Set swap space
         if: steps.swap.outputs.swap_gb != '0'
         uses: pierotofy/set-swap-space@fc79b3f67fa8a838184ce84a674ca12238d2c761
@@ -184,7 +216,6 @@ jobs:
           cd "$ANDROID_DIR"
           echo "=== fog / recoveryimage / ${BUILD_JOBS} build jobs ==="
 
-          # Print resource usage during quiet phases of Soong.
           (
             while true; do
               {
@@ -199,7 +230,6 @@ jobs:
           monitor_pid=$!
           trap 'kill "$monitor_pid" 2>/dev/null || true' EXIT
 
-          # Do not use set -u with build/envsetup.sh.
           set +e
           (
             set -eo pipefail
@@ -228,6 +258,7 @@ jobs:
               cp -v "$out/$img" "$dst/"
             fi
           done
+
           find "$out" -maxdepth 1 -type f \
             \( -name 'AERA-R*.img' -o -name 'AERA-R*.zip' \) \
             -exec cp -v {} "$dst/" \;
@@ -236,6 +267,7 @@ jobs:
             echo '::error::No recovery image was generated'
             exit 1
           }
+
           cd "$dst"
           find . -maxdepth 1 -type f \( -name '*.img' -o -name '*.zip' \) \
             -print0 | xargs -0 -r sha256sum > SHA256SUMS
@@ -270,3 +302,41 @@ jobs:
             resources.log
           if-no-files-found: ignore
           retention-days: 7
+
+      - name: Notify Telegram - build result
+        if: always()
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          NOTIFY_QUIET: ${{ inputs.notification_mode == 'quiet' }}
+          BUILD_STATUS: ${{ job.status }}
+        run: |
+          if [[ -z "$TELEGRAM_BOT_TOKEN" || -z "$TELEGRAM_CHAT_ID" ]]; then
+            echo "Telegram secrets not configured"
+            exit 0
+          fi
+
+          case "$BUILD_STATUS" in
+            success)
+              MESSAGE="✅ AERA Recovery 16.0 (fog)
+          Build completed successfully!
+          Download artifacts in GitHub Actions." ;;
+            failure)
+              MESSAGE="❌ AERA Recovery 16.0 (fog)
+          Build failed. Check GitHub Actions logs." ;;
+            *)
+              MESSAGE="⚠️ AERA Recovery 16.0 (fog)
+          Build status: ${BUILD_STATUS}" ;;
+          esac
+
+          MESSAGE="${MESSAGE}
+          https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+          curl -fsS --retry 2 --max-time 20 \
+            -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${MESSAGE}" \
+            -d "disable_notification=${NOTIFY_QUIET}" \
+            > /dev/null
