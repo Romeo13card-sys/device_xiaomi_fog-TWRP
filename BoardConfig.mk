@@ -39,7 +39,6 @@ BOARD_TAGS_OFFSET := 0x00000100
 BOARD_KERNEL_TAGS_OFFSET := 0x00000100
 BOARD_RAMDISK_USE_LZ4 := true
 BOARD_USES_RECOVERY_AS_BOOT := true
-BOARD_INCLUDE_DTB_IN_BOOTIMG := false  # Android boot header v3 keeps DTB in vendor_boot
 TARGET_KERNEL_ARCH := arm64
 TARGET_PREBUILT_KERNEL := $(DEVICE_PATH)/prebuilt/Image.gz
 
@@ -73,7 +72,6 @@ AB_OTA_UPDATER := true
 AB_OTA_PARTITIONS += boot dtbo odm product system system_ext vbmeta vbmeta_system vendor vendor_boot
 
 BOARD_AVB_ENABLE := true
-BOARD_BUILD_SYSTEM_ROOT_IMAGE := false
 TARGET_RECOVERY_FSTAB := $(DEVICE_PATH)/recovery/root/system/etc/recovery.fstab
 TARGET_RECOVERY_PIXEL_FORMAT := RGBX_8888
 RECOVERY_SDCARD_ON_DATA := true
