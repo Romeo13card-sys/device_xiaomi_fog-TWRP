@@ -236,7 +236,7 @@ jobs:
             source build/envsetup.sh
             export ALLOW_MISSING_DEPENDENCIES=true
             lunch twrp_fog-bp2a-eng
-            m -j"$BUILD_JOBS" adbd recoveryimage
+            m -j"$BUILD_JOBS" adbd bootimage
           ) 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
           result=${PIPESTATUS[0]}
           set -e
