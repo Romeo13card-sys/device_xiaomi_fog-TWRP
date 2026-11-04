@@ -1,4 +1,3 @@
-
 name: AERA Recovery 16.0 - Redmi 10C (fog)
 
 on:
@@ -7,7 +6,7 @@ on:
       sync_jobs:
         description: Parallel repo sync jobs
         required: true
-        default: '2'
+        default: '4'
         type: choice
         options: ['1', '2', '4']
       build_jobs:
@@ -29,11 +28,9 @@ jobs:
     name: Build AERA 16.0 for fog
     runs-on: ubuntu-24.04
     timeout-minutes: 360
-
     defaults:
       run:
         shell: bash
-
     env:
       ANDROID_DIR: ${{ github.workspace }}/android
       DEVICE_DIR: device/xiaomi/fog
@@ -43,228 +40,208 @@ jobs:
       LANG: C.UTF-8
       LC_ALL: C.UTF-8
       GIT_TERMINAL_PROMPT: '0'
+      GOMAXPROCS: '2'
+      GOGC: '50'
+      GOMEMLIMIT: 10GiB
 
     steps:
-      - name: Checkout fog device tree
+      - name: Checkout device tree
         uses: actions/checkout@v4
         with:
           path: fog-tree
           persist-credentials: false
 
-      - name: Prepare disk space
-        run: |
-          set -eo pipefail
-          echo '=== Runner resources before cleanup ==='
-          df -h /
-          free -h
-
-          sudo rm -rf /usr/local/lib/android \
-            /usr/share/dotnet /usr/local/share/powershell \
-            /opt/ghc /usr/local/.ghcup \
-            /opt/hostedtoolcache/CodeQL
-
-          sudo apt-get clean
-
-          echo '=== Available disk space ==='
-          df -h /
+      # Reuse the effective cleanup action from the successful tornado build.
+      # Pin its commit instead of tracking a mutable @main branch.
+      - name: Clean runner disk
+        uses: rokibhasansagar/slimhub_actions@c2a6e4317d3de2b623ac7395b05e9d2149e8289b
 
       - name: Install build tools
         run: |
           set -eo pipefail
-
           sudo apt-get update
-
-          sudo DEBIAN_FRONTEND=noninteractive \
-            apt-get install -y --no-install-recommends \
-            git git-lfs curl wget unzip zip \
-            lz4 zstd bc bison flex build-essential \
-            gperf libssl-dev libxml2-utils xsltproc \
-            libncurses-dev python3 python3-pip rsync \
-            openjdk-17-jdk util-linux
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            git git-lfs curl wget aria2 python3 python-is-python3 \
+            unzip zip bc bison flex build-essential gperf \
+            gcc-multilib g++-multilib lib32ncurses-dev lib32readline-dev lib32z1-dev \
+            liblz4-tool lz4 zstd libncurses-dev libssl-dev \
+            libxml2 libxml2-utils xsltproc rsync lzop pngcrush \
+            squashfs-tools schedtool imagemagick ccache util-linux
 
           mkdir -p "$HOME/bin"
-
           curl -fLsS --retry 3 \
             https://storage.googleapis.com/git-repo-downloads/repo \
             -o "$HOME/bin/repo"
-
           chmod +x "$HOME/bin/repo"
-
           "$HOME/bin/repo" version
-          command -v script
+          df -h /
 
-      - name: Initialize AERA 16.0 manifest
+      # AERA's successful example builds with Zulu JDK 11.
+      - name: Set up OpenJDK
+        uses: actions/setup-java@v6
+        with:
+          distribution: zulu
+          java-version: '11'
+
+      - name: Initialize AERA 16.0 sources
         run: |
           set -eo pipefail
-
           mkdir -p "$ANDROID_DIR"
           cd "$ANDROID_DIR"
-
           "$HOME/bin/repo" init --depth=1 \
             -u https://github.com/AERA-Recovery/android_manifest.git \
             -b aera-16.0
+          "$HOME/bin/repo" manifest -o "$GITHUB_WORKSPACE/aera-manifest.xml"
 
-          "$HOME/bin/repo" manifest \
-            -o "$GITHUB_WORKSPACE/aera-manifest.xml"
-
-          echo 'Manifest initialized.'
-
-      - name: Repo sync - live progress
+      - name: Sync sources with live progress
         run: |
           set -eo pipefail
-
           cd "$ANDROID_DIR"
           export PYTHONUNBUFFERED=1
 
-          echo "=== Syncing AERA 16.0 with ${SYNC_JOBS} jobs ==="
-          echo "Started: $(date -u)"
-
-          # Allocate a terminal to display normal repo progress.
-          # Preserve repo's exit status and save the live output.
-
           for attempt in 1 2; do
-            echo "=== repo sync attempt ${attempt}/2 ==="
-
+            echo "=== repo sync attempt ${attempt}/2; jobs=${SYNC_JOBS} ==="
             set +e
-
             script -q -e -c \
               "$HOME/bin/repo sync -c --no-clone-bundle --no-tags -j${SYNC_JOBS}" \
               /dev/null 2>&1 | tee -a "$GITHUB_WORKSPACE/repo-sync.log"
-
             status=${PIPESTATUS[0]}
             set -e
-
             if [ "$status" -eq 0 ]; then
-              echo '=== repo sync completed successfully ==='
               break
             fi
-
-            echo "repo sync failed with code ${status}"
-
             if [ "$attempt" -eq 2 ]; then
-              echo '::error::repo sync failed after two attempts'
+              echo "::error::repo sync failed: ${status}"
               exit "$status"
             fi
-
             sleep 15
           done
 
-          test -f build/envsetup.sh || {
-            echo '::error::Android build/envsetup.sh was not synced'
-            exit 1
-          }
-
-          test -f system/tools/mkbootimg/unpack_bootimg.py || {
-            echo '::error::mkbootimg source was not synced'
-            exit 1
-          }
-
+          test -f build/envsetup.sh
+          test -f system/tools/mkbootimg/unpack_bootimg.py
           df -h /
 
-      - name: Install fog device tree
+      - name: Install Redmi 10C fog device tree
         run: |
           set -eo pipefail
-
           mkdir -p "$ANDROID_DIR/$DEVICE_DIR"
-
-          rsync -a \
-            --exclude='.git' \
-            --exclude='.github' \
-            --exclude='scripts' \
-            "$GITHUB_WORKSPACE/fog-tree/" \
-            "$ANDROID_DIR/$DEVICE_DIR/"
-
-          for file in \
-            BoardConfig.mk \
-            AndroidProducts.mk \
-            twrp_fog.mk \
-            device.mk; do
-
-            test -f "$ANDROID_DIR/$DEVICE_DIR/$file" || {
-              echo "::error::Missing device tree file: $file"
+          rsync -a --exclude='.git' --exclude='.github' --exclude='scripts' \
+            "$GITHUB_WORKSPACE/fog-tree/" "$ANDROID_DIR/$DEVICE_DIR/"
+          for f in BoardConfig.mk AndroidProducts.mk twrp_fog.mk device.mk; do
+            test -f "$ANDROID_DIR/$DEVICE_DIR/$f" || {
+              echo "::error::Missing device file $f"
               exit 1
             }
           done
-
           test -f "$ANDROID_DIR/vendor/twrp/config/common.mk"
 
-          echo 'Device tree installed.'
-
-      - name: Extract kernel from working OrangeFox image
+      - name: Prepare known-working OrangeFox kernel
         run: |
           set -eo pipefail
-
           cd "$ANDROID_DIR"
-
-          bash \
-            "$GITHUB_WORKSPACE/fog-tree/scripts/prepare-prebuilt.sh" \
+          bash "$GITHUB_WORKSPACE/fog-tree/scripts/prepare-prebuilt.sh" \
             2>&1 | tee "$GITHUB_WORKSPACE/prebuilt.log"
-
-          test -s "$DEVICE_DIR/prebuilt/Image.gz" || {
-            echo '::error::OrangeFox kernel extraction failed'
-            exit 1
-          }
-
+          test -s "$DEVICE_DIR/prebuilt/Image.gz"
           ls -lh "$DEVICE_DIR/prebuilt/Image.gz"
 
-      - name: Build AERA Recovery
+      - name: Choose safe swap size
+        id: swap
         run: |
           set -eo pipefail
+          available_mb=$(df -Pm / | awk 'NR==2 {print $4}')
+          echo "Free disk before swap: ${available_mb} MiB"
+          # The swap action replaces the runner's default 3-GiB swapfile.
+          # Reserve substantial disk space for recovery compilation.
+          if [ "$available_mb" -ge 59392 ]; then
+            swap_gb=30
+          elif [ "$available_mb" -ge 39936 ]; then
+            swap_gb=12
+          elif [ "$available_mb" -ge 30720 ]; then
+            swap_gb=8
+          else
+            swap_gb=0
+          fi
+          echo "swap_gb=$swap_gb" >> "$GITHUB_OUTPUT"
+          echo "Selected swap size: ${swap_gb} GiB"
 
+      # Same swap action as tornado; adapt amount to the actual free disk.
+      - name: Set swap space
+        if: steps.swap.outputs.swap_gb != '0'
+        uses: pierotofy/set-swap-space@fc79b3f67fa8a838184ce84a674ca12238d2c761
+        with:
+          swap-size-gb: ${{ steps.swap.outputs.swap_gb }}
+
+      - name: Check runner resources
+        run: |
+          nproc
+          free -h
+          swapon --show || true
+          df -h /
+
+      - name: Build AERA recovery for fog
+        run: |
+          set -eo pipefail
           cd "$ANDROID_DIR"
+          echo "=== fog / recoveryimage / ${BUILD_JOBS} build jobs ==="
 
-          echo "=== Building AERA 16.0 with ${BUILD_JOBS} jobs ==="
+          # Print resource usage during quiet phases of Soong.
+          (
+            while true; do
+              {
+                echo "=== RESOURCES $(date -u +'%H:%M:%S UTC') ==="
+                free -h
+                df -h /
+                ps -eo pid,rss,comm --sort=-rss | head -n 8 || true
+              } 2>&1 | tee -a "$GITHUB_WORKSPACE/resources.log"
+              sleep 45
+            done
+          ) &
+          monitor_pid=$!
+          trap 'kill "$monitor_pid" 2>/dev/null || true' EXIT
 
-          # No set -u: Android envsetup uses unset variables.
-          # Capture lunch failures and compiler errors.
-
+          # Do not use set -u with build/envsetup.sh.
+          set +e
           (
             set -eo pipefail
-
             source build/envsetup.sh
-
+            export ALLOW_MISSING_DEPENDENCIES=true
             lunch twrp_fog-bp2a-eng
-
             m -j"$BUILD_JOBS" adbd recoveryimage
-
           ) 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+          result=${PIPESTATUS[0]}
+          set -e
 
-          echo '=== AERA build completed successfully ==='
+          kill "$monitor_pid" 2>/dev/null || true
+          echo "Build exit code: $result"
+          exit "$result"
 
-      - name: Collect images and SHA256
+      - name: Collect recovery images and hashes
         if: success()
         run: |
           set -eo pipefail
-
-          PRODUCT_OUT="$ANDROID_DIR/out/target/product/fog"
-
-          mkdir -p "$GITHUB_WORKSPACE/artifacts"
-
-          found=0
+          out="$ANDROID_DIR/out/target/product/fog"
+          dst="$GITHUB_WORKSPACE/artifacts"
+          mkdir -p "$dst"
 
           for img in boot.img recovery.img vendor_boot.img; do
-            if [ -s "$PRODUCT_OUT/$img" ]; then
-              cp -v \
-                "$PRODUCT_OUT/$img" \
-                "$GITHUB_WORKSPACE/artifacts/"
-
-              found=1
+            if [ -s "$out/$img" ]; then
+              cp -v "$out/$img" "$dst/"
             fi
           done
+          find "$out" -maxdepth 1 -type f \
+            \( -name 'AERA-R*.img' -o -name 'AERA-R*.zip' \) \
+            -exec cp -v {} "$dst/" \;
 
-          if [ "$found" -eq 0 ]; then
-            echo '::error::Build reported success, but no image was produced'
+          compgen -G "$dst/*.img" >/dev/null || {
+            echo '::error::No recovery image was generated'
             exit 1
-          fi
+          }
+          cd "$dst"
+          find . -maxdepth 1 -type f \( -name '*.img' -o -name '*.zip' \) \
+            -print0 | xargs -0 -r sha256sum > SHA256SUMS
+          ls -lh
 
-          (
-            cd "$GITHUB_WORKSPACE/artifacts"
-            sha256sum ./*.img > SHA256SUMS
-          )
-
-          ls -lh "$GITHUB_WORKSPACE/artifacts"
-
-      - name: Upload AERA recovery images
+      - name: Upload recovery images
         if: success()
         uses: actions/upload-artifact@v4
         with:
@@ -278,17 +255,18 @@ jobs:
         run: |
           df -h /
           free -h
-          ls -lh "$GITHUB_WORKSPACE/"*.log 2>/dev/null || true
+          swapon --show || true
 
-      - name: Upload logs and manifest
+      - name: Upload build logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: AERA-fog-build-logs
           path: |
+            aera-manifest.xml
             repo-sync.log
             prebuilt.log
             build.log
-            aera-manifest.xml
+            resources.log
           if-no-files-found: ignore
           retention-days: 7
